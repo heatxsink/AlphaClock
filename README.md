@@ -3,6 +3,28 @@ Software for Alpha Clock Five from Evil Mad Scientist Laboratories
 
 Complete documentation here: http://wiki.evilmadscientist.com/Alpha_Clock_Five
 
+## Building
+
+The firmware was written for Arduino 1.0.3. It builds with current tools using
+[arduino-cli](https://arduino.github.io/arduino-cli/) and the
+[MightyCore](https://github.com/MCUdude/MightyCore) board package for the ATmega644:
+
+```sh
+arduino-cli config add board_manager.additional_urls \
+  https://mcudude.github.io/MightyCore/package_MCUdude_MightyCore_index.json
+arduino-cli core update-index
+arduino-cli core install MightyCore:avr
+arduino-cli lib install Time DS1307RTC
+
+FQBN="MightyCore:avr:644:variant=modelP,pinout=sanguino,clock=16MHz_external"
+arduino-cli compile -b "$FQBN" --library alphafive alphafive/examples/AlphaClock
+arduino-cli upload  -b "$FQBN" -p /dev/ttyUSB0 alphafive/examples/AlphaClock
+```
+
+Upload goes over an FTDI cable to the clock's serial bootloader. The upload step
+has not been verified against the bootloader that ships on the clock; if it fails,
+check the bootloader baud rate against the Evil Mad Scientist wiki.
+
 ## Unix epoch mode
 
 Displays the current Unix time (seconds since 1970-01-01 UTC). It takes ten digits,

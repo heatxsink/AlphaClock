@@ -12,7 +12,8 @@ The second unit only needs firmware v2.0 or newer and no configuration.
 
 Setup, on the first unit (the one upstream in the daisy chain):
 
-1. Hold the time-set and alarm-set buttons to enter the settings menu.
+1. Hold `+` and `-` for two seconds to enter the settings menu; the time-set button
+   steps forward through menu items, alarm-set steps back.
 2. Go to `UTC` and set the offset of the clock's local time from UTC, in 15-minute
    steps (e.g. `-07:00` for PDT). The clock has no DST rules; adjust this when you
    change the clock for daylight saving, or keep the clock on UTC and leave it at `+00:00`.

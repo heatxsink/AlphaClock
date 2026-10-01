@@ -1207,8 +1207,10 @@ void SerialSendDataDaisyChain (char DataIn[])
   *toPtr++ = *fromPtr++;
   *toPtr = *fromPtr; 
 
+#if defined(UBRR1H)  // Second UART (daisy chain): present on 644A/P/PA, absent on the original 644.
   // Write exactly 13 bytes: the buffer is not null-terminated.
   Serial1.write((const uint8_t *) outputBuffer, 13);
+#endif
 }
 
 

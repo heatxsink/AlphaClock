@@ -16,7 +16,7 @@ arduino-cli core update-index
 arduino-cli core install MightyCore:avr
 arduino-cli lib install Time DS1307RTC
 
-FQBN="MightyCore:avr:644:variant=modelP,pinout=sanguino,clock=16MHz_external"
+FQBN="MightyCore:avr:644:variant=modelA,pinout=sanguino,clock=16MHz_external"
 arduino-cli compile -b "$FQBN" --library alphafive alphafive/examples/AlphaClock
 arduino-cli upload  -b "$FQBN" -p /dev/ttyUSB0 alphafive/examples/AlphaClock
 ```

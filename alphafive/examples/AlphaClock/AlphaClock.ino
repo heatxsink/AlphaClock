@@ -163,6 +163,7 @@ byte RedrawNow, RedrawNow_NoFade;
 #define HoldDownTime 2000         // How long to hold buttons to acces smenus requiring holding two buttons
 byte buttonStateLast;
 byte buttonMonitor;
+byte buttonSampleLast;    // Raw button reading from the previous check, for debouncing
 unsigned long Btn1_AlrmSet_StartTime, Btn2_TimeSet_StartTime, Btn3_Plus_StartTime, Btn4_Minus_StartTime;
 unsigned long NextButtonCheck, LastButtonPress;
 
@@ -241,11 +242,17 @@ void TurnOffAlarm(void)
 
 void checkButtons(void )
 { 
-  buttonMonitor |= a5GetButtons(); 
-
   if (milliTemp  >=  NextButtonCheck)  // Typically, go through this every 20 ms.
   {
     NextButtonCheck = milliTemp + ButtonCheckInterval;
+
+    // Debounce: a button counts as down only if it reads down on two consecutive
+    // checks. The buttons have only the weak internal pull-ups, so a momentary
+    // glitch on a button line must not register as a press (or as a held + and -,
+    // which toggles the settings menu).
+    byte buttonSample = a5GetButtons();
+    buttonMonitor = buttonSample & buttonSampleLast;
+    buttonSampleLast = buttonSample;
     /*
      #define a5alarmSetBtn  1				// Snooze/Set alarm button
      #define a5timeSetBtn   2				// Set time button
@@ -605,8 +612,7 @@ void checkButtons(void )
       }
     }
 
-    buttonStateLast = buttonMonitor;
-    buttonMonitor = 0;
+    buttonStateLast = buttonMonitor;  // buttonMonitor keeps the debounced state until the next check
   }
 }
 

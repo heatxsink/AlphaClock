@@ -62,7 +62,7 @@
 //#include "fiveletterwordspd.h" // Public domain alternative
 
 
-#include <Time.h>       // The Arduino Time library, http://www.arduino.cc/playground/Code/Time
+#include <TimeLib.h>    // The Arduino Time library, http://www.arduino.cc/playground/Code/Time
 #include <Wire.h>       // For optional RTC module
 #include <DS1307RTC.h>  // For optional RTC module. (This library included with the Arduino Time library)
 #include <EEPROM.h>     // For saving settings 
@@ -77,6 +77,7 @@
 #define a5AlarmToneDefault 2
 #define a5NumberCharSetDefault 2;
 #define a5DisplayModeDefault 0;
+#define a5UTCOffsetDefault 0     // Local time offset from UTC, in 15-minute steps
 
 // Clock mode variables
 
@@ -95,7 +96,7 @@ unsigned int NightLightStep;
 // Configuration menu:
 byte menuItem;   //Current position within options menu
 int8_t optionValue; 
-#define MenuItemsMax 10
+#define MenuItemsMax 11
 
 #define AMPM24HRMenuItem 0
 #define NightLightMenuItem 1
@@ -107,7 +108,8 @@ int8_t optionValue;
 #define SetMonthMenuItem 7
 #define SetDayMenuItem 8
 #define SetSecondsMenuItem 9 
-#define AltModeMenuItem 10 
+#define AltModeMenuItem 10
+#define UTCOffsetMenuItem 11
 
 
 
@@ -122,6 +124,23 @@ byte modeShowDateViaButtons;
 byte modeLEDTest;
 byte UpdateEE; 
 int8_t numberCharSet;
+
+// Unix epoch display mode.
+// DisplayMode bit 32: this unit is the LEFT half (shows high 5 digits).
+// DisplayMode bit 64: this unit is the RIGHT half (shows low 5 digits).
+// The other half is sent to the next Alpha Clock Five in the daisy chain.
+#define EpochLeftBit 32
+#define EpochRightBit 64
+#define EpochBits (EpochLeftBit | EpochRightBit)
+#define UTCOffsetMin -48   // UTC-12:00
+#define UTCOffsetMax 56    // UTC+14:00
+int8_t UTCOffset;          // Local time minus UTC, in 15-minute steps
+byte EpochDaisyActive;     // Nonzero while the downstream unit is showing epoch digits
+time_t EpochLastSent;
+byte EpochBrightnessSent = 255;  // Brightness last sent downstream; 255 = none yet
+unsigned long EpochPulseStart;   // millis() at the most recent epoch second tick
+byte EpochPulseFollow;           // Nonzero while an upstream unit drives our heartbeat via MP
+#define EpochPulseLength 500     // Rear LED heartbeat fade-out time, ms
 
 
 // Other global variables:
@@ -148,6 +167,7 @@ byte RedrawNow, RedrawNow_NoFade;
 #define HoldDownTime 2000         // How long to hold buttons to acces smenus requiring holding two buttons
 byte buttonStateLast;
 byte buttonMonitor;
+byte buttonSampleLast;    // Raw button reading from the previous check, for debouncing
 unsigned long Btn1_AlrmSet_StartTime, Btn2_TimeSet_StartTime, Btn3_Plus_StartTime, Btn4_Minus_StartTime;
 unsigned long NextButtonCheck, LastButtonPress;
 
@@ -226,11 +246,17 @@ void TurnOffAlarm(void)
 
 void checkButtons(void )
 { 
-  buttonMonitor |= a5GetButtons(); 
-
   if (milliTemp  >=  NextButtonCheck)  // Typically, go through this every 20 ms.
   {
     NextButtonCheck = milliTemp + ButtonCheckInterval;
+
+    // Debounce: a button counts as down only if it reads down on two consecutive
+    // checks. The buttons have only the weak internal pull-ups, so a momentary
+    // glitch on a button line must not register as a press (or as a held + and -,
+    // which toggles the settings menu).
+    byte buttonSample = a5GetButtons();
+    buttonMonitor = buttonSample & buttonSampleLast;
+    buttonSampleLast = buttonSample;
     /*
      #define a5alarmSetBtn  1				// Snooze/Set alarm button
      #define a5timeSetBtn   2				// Set time button
@@ -590,8 +616,7 @@ void checkButtons(void )
       }
     }
 
-    buttonStateLast = buttonMonitor;
-    buttonMonitor = 0;
+    buttonStateLast = buttonMonitor;  // buttonMonitor keeps the debounced state until the next check
   }
 }
 
@@ -634,7 +659,10 @@ void DisplayMenuOptionName(void){
     DisplayWordSequence(9); // "TIME AND..."
     //    DisplayWord ("ALTW/", 2000);  
     //   DisplayWordDP("__11_");
-    break; 
+    break;
+  case UTCOffsetMenuItem:
+    DisplayWord ("UTC  ", 800);
+    break;
   default:  // do nothing!
     break;
   }
@@ -1012,6 +1040,7 @@ void setup() {
     NightLightType = a5NightLightTypeDefault;   
     numberCharSet = a5NumberCharSetDefault; 
     DisplayMode = a5DisplayModeDefault;       
+    UTCOffset = a5UTCOffsetDefault;
 
     wordSequenceStep = 0;
     DisplayWord ("*****", 1000); 
@@ -1100,7 +1129,9 @@ void loop() {
     a5LoadNextFadeStage();
     a5loadVidBuf_fromOSB(); 
 
-    if (NightLightType >= 4)  // Only in pulse mode do we need to regularly update
+    if ((DisplayMode & EpochBits) || EpochPulseFollow)  // Epoch mode: rear LED heartbeat, once per second
+      UpdateEpochPulse();
+    else if (NightLightType >= 4)  // Only in pulse mode do we need to regularly update
       updateNightLight();
 
     if (UpdateEE)   // Don't need to check this more than 100 times/second.
@@ -1149,6 +1180,8 @@ void loop() {
   if (alarmNow)
     ManageAlarm();
 
+  UpdateEpochDaisyChain();
+
 
 
   if(Serial.available() ) 
@@ -1186,7 +1219,10 @@ void SerialSendDataDaisyChain (char DataIn[])
   *toPtr++ = *fromPtr++;
   *toPtr = *fromPtr; 
 
-  Serial1.write(outputBuffer);
+#if defined(UBRR1H)  // Second UART (daisy chain): present on 644A/P/PA, absent on the original 644.
+  // Write exactly 13 bytes: the buffer is not null-terminated.
+  Serial1.write((const uint8_t *) outputBuffer, 13);
+#endif
 }
 
 
@@ -1264,9 +1300,11 @@ void processSerialMessage() {
               c = Serial.read();  // Read input buffer, char 3 of 10
 
               Brightness = (10 * (c2 - '0') + (c - '0'));
-              UpdateBrightness = 1; 
+              if (Brightness > BrightnessMax)
+                Brightness = BrightnessMax;  // Out-of-range values would index past MBlevel[]
+              UpdateBrightness = 1;
             }
-            if (c == '1')
+            else if (c == '1')  // else: c was just overwritten with the brightness ones digit
             {// Load altnernate number set
               a5loadAltNumbers(c2 - '0'); 
               Serial.read();  // Empty input buffer, char 3 of 10
@@ -1338,6 +1376,17 @@ void processSerialMessage() {
           modeLEDTest = 0;
 
           EndVCRmode();
+          if (EpochPulseFollow) {
+            EpochPulseFollow = 0;
+            updateNightLight();  // Restore the configured night light after the heartbeat
+          }
+        }
+        else if (c2 == 'P')   { // Command: 'MP' : Pulse the rear night light once (epoch heartbeat)
+          EpochPulseStart = milliTemp;
+          EpochPulseFollow = 1;
+          for( i=0; i < 10; i++){
+            Serial.read();  // Empty input buffer
+          }
         }
       }
 
@@ -1579,7 +1628,7 @@ void UpdateDisplay (byte forceUpdate) {
         else
           temp--;
 
-        DisplayMode = (DisplayMode & 12U) | (temp);
+        DisplayMode = (DisplayMode & ~3) | (temp);
         optionValue = 0;
         forceUpdate = 1;
       }   
@@ -1590,6 +1639,8 @@ void UpdateDisplay (byte forceUpdate) {
       // if (TimeDisplay & 4): Alternate date with time
       // if (TimeDisplay & 8): Alternate date with seconds
       // if (TimeDisplay & 16): Alternate date with words
+      // if (TimeDisplay & 32): Unix epoch, this unit is the left half
+      // if (TimeDisplay & 64): Unix epoch, this unit is the right half
 
       if (optionValue != 0)
       {
@@ -1599,14 +1650,18 @@ void UpdateDisplay (byte forceUpdate) {
         if ( DisplayMode & 8)
           temp = 3;
         if ( DisplayMode & 16)
-          temp = 4;    
+          temp = 4;
+        if ( DisplayMode & EpochLeftBit)
+          temp = 5;
+        if ( DisplayMode & EpochRightBit)
+          temp = 6;
 
         temp += optionValue;
 
-        if (temp == 0) 
-          temp = 4; // Wrap around (low side)
-        else if (temp == 5)
-          temp = 0;  // wrap around (high side) 
+        if (temp == 0)
+          temp = 6; // Wrap around (low side)
+        else if (temp == 7)
+          temp = 1;  // wrap around (high side)
 
         DisplayMode &= 3U;
 
@@ -1627,7 +1682,11 @@ void UpdateDisplay (byte forceUpdate) {
       }
       else if (DisplayMode & 16U){
         DisplayWord ("WORDS", 500);
-      }     
+      }
+      else if (DisplayMode & EpochLeftBit)
+        DisplayWord ("EPO L", 500);
+      else if (DisplayMode & EpochRightBit)
+        DisplayWord ("EPO R", 500);
       else
         DisplayWord (" NONE", 500);
 
@@ -1673,7 +1732,36 @@ void UpdateDisplay (byte forceUpdate) {
         forceUpdate = 1;
       }   
       TimeDisplay(32, forceUpdate); // Show clock time, seconds
-    }    
+    }
+    else if (menuItem == UTCOffsetMenuItem)  // Local time offset from UTC, for epoch display
+    {
+      if (optionValue != 0){
+        UTCOffset += optionValue;
+        if (UTCOffset < UTCOffsetMin)
+          UTCOffset = UTCOffsetMax;
+        if (UTCOffset > UTCOffsetMax)
+          UTCOffset = UTCOffsetMin;
+        optionValue = 0;
+      }
+
+      // Display as sign, HH:MM, e.g., "-07:00" or "+05:30"
+      char offsetWord[5];
+      byte offsetAbs = (UTCOffset < 0) ? -UTCOffset : UTCOffset;
+      byte offsetHr = offsetAbs >> 2;
+      byte offsetMin = 15 * (offsetAbs & 3);
+
+      offsetWord[0] = (UTCOffset < 0) ? '-' : '+';
+      temp = U8DIVBY10(offsetHr);
+      offsetWord[1] = temp + a5_integerOffset;
+      offsetWord[2] = offsetHr - 10 * temp + a5_integerOffset;
+      temp = U8DIVBY10(offsetMin);
+      offsetWord[3] = temp + a5_integerOffset;
+      offsetWord[4] = offsetMin - 10 * temp + a5_integerOffset;
+
+      DisplayWord (offsetWord, 500);
+      DisplayWordDP("__12_");
+      ExtendTextDisplay = 1;
+    }
 
     if(forceUpdate && ExtendTextDisplay)
     {  
@@ -1700,7 +1788,11 @@ void UpdateDisplay (byte forceUpdate) {
     // Time Display Mode!  Possibly with aux. display.
 
 
-    if ((DisplayMode > 3) && (DisplayMode < 32))
+    if (DisplayMode & EpochBits)
+    {
+      TimeDisplay(37, forceUpdate); // Unix epoch
+    }
+    else if ((DisplayMode > 3) && (DisplayMode < 32))
     {
 
 
@@ -2094,13 +2186,129 @@ void TimeDisplay (byte DisplayModeLocal, byte forceUpdateCopy)  {
       else
         a5loadOSB_DP("00000",a5_brightLevel);     
 
-      a5BeginFadeToOSB(); 
-    }   
+      a5BeginFadeToOSB();
+    }
+  }
+  else if (DisplayModeLocal == 37)  // Unix epoch, one half of the ten digits
+  {
+    if(forceUpdateCopy)
+    {
+      char digits[10];
+      EpochDigits(digits);
+
+      a5clearOSB();
+      if (DisplayMode & EpochRightBit)
+        a5loadOSB_Ascii(&digits[5],a5_brightLevel);
+      else
+        a5loadOSB_Ascii(digits,a5_brightLevel);
+
+      if (AlarmEnabled)
+        a5loadOSB_DP("20000",a5_brightLevel);
+
+      a5BeginFadeToOSB();
+    }
   }
 
   DisplayModeLocalLast = DisplayModeLocal;
-  SecLast = SecNow; 
+  SecLast = SecNow;
 
+}
+
+
+void EpochDigits (char digits[])
+{
+  // Fill digits[0..9] with the current Unix time (UTC) as ASCII, most significant first.
+  unsigned long t = now() - (long) UTCOffset * 900L;
+  int8_t i = 9;
+
+  while (i >= 0)
+  {
+    digits[i] = (t % 10) + a5_integerOffset;
+    t /= 10;
+    i--;
+  }
+}
+
+
+void UpdateEpochDaisyChain (void)
+{
+  // In epoch mode, send the half of the epoch that this unit is not showing to the
+  // next Alpha Clock Five in the daisy chain, once per second. When leaving epoch mode,
+  // return the downstream unit to its own time display.
+
+  char message[12];
+  byte i;
+
+  if (DisplayMode & EpochBits)
+  {
+    time_t t = now();
+    if (t == EpochLastSent)
+      return;
+    EpochLastSent = t;
+    EpochPulseStart = milliTemp;
+
+    char digits[10];
+    EpochDigits(digits);
+
+    byte offset = (DisplayMode & EpochRightBit) ? 0 : 5;
+
+    message[0] = 'A';  // A0: display five ASCII characters, then five DP characters
+    message[1] = '0';
+    for (i = 0; i < 5; i++){
+      message[2 + i] = digits[offset + i];
+      message[7 + i] = ' ';
+    }
+    SerialSendDataDaisyChain(message);
+    EpochDaisyActive = 1;
+
+    message[0] = 'M';  // MP: downstream unit pulses its rear LED with ours
+    message[1] = 'P';
+    for (i = 2; i < 12; i++)
+      message[i] = ' ';
+    SerialSendDataDaisyChain(message);
+
+    // Keep the downstream unit's brightness in step with this one. Also resend
+    // every 10 seconds, so a downstream unit that was power-cycled catches up.
+    if ((Brightness != EpochBrightnessSent) || ((t % 10) == 0))
+    {
+      message[0] = 'B';  // B0, setting 0: brightness, as two ASCII digits
+      message[1] = '0';
+      message[2] = '0';
+      message[3] = '0' + Brightness / 10;
+      message[4] = '0' + Brightness % 10;
+      for (i = 5; i < 12; i++)
+        message[i] = ' ';
+      SerialSendDataDaisyChain(message);
+      EpochBrightnessSent = Brightness;
+    }
+  }
+  else if (EpochDaisyActive)
+  {
+    message[0] = 'M';  // MT: resume time display
+    message[1] = 'T';
+    for (i = 2; i < 12; i++)
+      message[i] = ' ';
+    SerialSendDataDaisyChain(message);
+    EpochDaisyActive = 0;
+    EpochBrightnessSent = 255;
+    updateNightLight();  // Restore the configured night light after the heartbeat
+  }
+}
+
+
+void UpdateEpochPulse (void)
+{
+  // Rear night light heartbeat in epoch mode: full brightness at each new second,
+  // fading out over EpochPulseLength ms (squared, like the "SLEEP" night light mode).
+  unsigned long elapsed = milliTemp - EpochPulseStart;
+  unsigned int level = 0;
+
+  if (elapsed < EpochPulseLength)
+  {
+    level = 255 - (elapsed * 255) / EpochPulseLength;
+    level = (level * level) >> 8;
+  }
+  a5nightLight(level);
 }
 
 
@@ -2145,6 +2353,7 @@ void ApplyDefaults (void) {
   AlarmTone =       a5AlarmToneDefault;
   NightLightType =  a5NightLightTypeDefault;  
   numberCharSet =   a5NumberCharSetDefault;
+  UTCOffset =       a5UTCOffsetDefault;
 }
 
 
@@ -2206,12 +2415,18 @@ void EEReadSettings (void) {
     numberCharSet = value;       
 
   value = EEPROM.read(8);   
-  if (value > 31) 
+  if (value > (EpochRightBit | 3)) 
   {
     DisplayMode = a5DisplayModeDefault;  
   }
   else  
     DisplayMode = value;       
+
+  value = EEPROM.read(9);
+  if ((value < 100 + UTCOffsetMin) || (value > 100 + UTCOffsetMax))
+    UTCOffset = a5UTCOffsetDefault;
+  else
+    UTCOffset = value - 100;
 
 
 
@@ -2279,6 +2494,11 @@ void EESaveSettings (void){
       a5writeEEPROM(8, DisplayMode);  
       indicateEEPROMwritten = 1;
     }      
+    value = EEPROM.read(9);
+    if (UTCOffset != (value - 100)){
+      a5writeEEPROM(9, UTCOffset + 100);
+      indicateEEPROMwritten = 1;
+    }
 
     if (indicateEEPROMwritten) { // Blink LEDs off to indicate when we're writing to the EEPROM 
       DisplayWord ("     ", 100);  

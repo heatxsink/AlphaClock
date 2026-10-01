@@ -62,7 +62,7 @@ byte a5_brightMode;  // 0: low brightness mode. 1: Medium. 2: High brightness mo
 volatile long a5_timer1_toggle_count;
 
 // Short month names:
-char a5_monthShortNames_P[] PROGMEM = "JANFEBMARAPRMAYJUNJULAUGSEPOCTNOVDEC";
+const char a5_monthShortNames_P[] PROGMEM = "JANFEBMARAPRMAYJUNJULAUGSEPOCTNOVDEC";
 
 
 /*
@@ -883,7 +883,9 @@ void a5Init (void)
     a5loadVidBuf_fromOSB();
     
     Serial.begin(19200);   // Initialize serial port.  19200 baud default matches Alpha5 library examples.
+#if defined(UBRR1H)  // Second UART (daisy chain): present on 644A/P/PA, absent on the original 644.
     Serial1.begin(19200);  // Initialize serial port.  19200 baud default matches Alpha5 library examples.
+#endif
     
 #ifndef HybridScanMode
     a5_intensityStep = 1;  // Needs to start at 1, not (default initialization of) 0.

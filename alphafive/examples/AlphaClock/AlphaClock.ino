@@ -137,6 +137,10 @@ int8_t numberCharSet;
 int8_t UTCOffset;          // Local time minus UTC, in 15-minute steps
 byte EpochDaisyActive;     // Nonzero while the downstream unit is showing epoch digits
 time_t EpochLastSent;
+byte EpochBrightnessSent = 255;  // Brightness last sent downstream; 255 = none yet
+unsigned long EpochPulseStart;   // millis() at the most recent epoch second tick
+byte EpochPulseFollow;           // Nonzero while an upstream unit drives our heartbeat via MP
+#define EpochPulseLength 500     // Rear LED heartbeat fade-out time, ms
 
 
 // Other global variables:
@@ -1125,7 +1129,9 @@ void loop() {
     a5LoadNextFadeStage();
     a5loadVidBuf_fromOSB(); 
 
-    if (NightLightType >= 4)  // Only in pulse mode do we need to regularly update
+    if ((DisplayMode & EpochBits) || EpochPulseFollow)  // Epoch mode: rear LED heartbeat, once per second
+      UpdateEpochPulse();
+    else if (NightLightType >= 4)  // Only in pulse mode do we need to regularly update
       updateNightLight();
 
     if (UpdateEE)   // Don't need to check this more than 100 times/second.
@@ -1294,9 +1300,11 @@ void processSerialMessage() {
               c = Serial.read();  // Read input buffer, char 3 of 10
 
               Brightness = (10 * (c2 - '0') + (c - '0'));
-              UpdateBrightness = 1; 
+              if (Brightness > BrightnessMax)
+                Brightness = BrightnessMax;  // Out-of-range values would index past MBlevel[]
+              UpdateBrightness = 1;
             }
-            if (c == '1')
+            else if (c == '1')  // else: c was just overwritten with the brightness ones digit
             {// Load altnernate number set
               a5loadAltNumbers(c2 - '0'); 
               Serial.read();  // Empty input buffer, char 3 of 10
@@ -1368,6 +1376,17 @@ void processSerialMessage() {
           modeLEDTest = 0;
 
           EndVCRmode();
+          if (EpochPulseFollow) {
+            EpochPulseFollow = 0;
+            updateNightLight();  // Restore the configured night light after the heartbeat
+          }
+        }
+        else if (c2 == 'P')   { // Command: 'MP' : Pulse the rear night light once (epoch heartbeat)
+          EpochPulseStart = milliTemp;
+          EpochPulseFollow = 1;
+          for( i=0; i < 10; i++){
+            Serial.read();  // Empty input buffer
+          }
         }
       }
 
@@ -2226,6 +2245,7 @@ void UpdateEpochDaisyChain (void)
     if (t == EpochLastSent)
       return;
     EpochLastSent = t;
+    EpochPulseStart = milliTemp;
 
     char digits[10];
     EpochDigits(digits);
@@ -2240,6 +2260,27 @@ void UpdateEpochDaisyChain (void)
     }
     SerialSendDataDaisyChain(message);
     EpochDaisyActive = 1;
+
+    message[0] = 'M';  // MP: downstream unit pulses its rear LED with ours
+    message[1] = 'P';
+    for (i = 2; i < 12; i++)
+      message[i] = ' ';
+    SerialSendDataDaisyChain(message);
+
+    // Keep the downstream unit's brightness in step with this one. Also resend
+    // every 10 seconds, so a downstream unit that was power-cycled catches up.
+    if ((Brightness != EpochBrightnessSent) || ((t % 10) == 0))
+    {
+      message[0] = 'B';  // B0, setting 0: brightness, as two ASCII digits
+      message[1] = '0';
+      message[2] = '0';
+      message[3] = '0' + Brightness / 10;
+      message[4] = '0' + Brightness % 10;
+      for (i = 5; i < 12; i++)
+        message[i] = ' ';
+      SerialSendDataDaisyChain(message);
+      EpochBrightnessSent = Brightness;
+    }
   }
   else if (EpochDaisyActive)
   {
@@ -2249,7 +2290,25 @@ void UpdateEpochDaisyChain (void)
       message[i] = ' ';
     SerialSendDataDaisyChain(message);
     EpochDaisyActive = 0;
+    EpochBrightnessSent = 255;
+    updateNightLight();  // Restore the configured night light after the heartbeat
   }
+}
+
+
+void UpdateEpochPulse (void)
+{
+  // Rear night light heartbeat in epoch mode: full brightness at each new second,
+  // fading out over EpochPulseLength ms (squared, like the "SLEEP" night light mode).
+  unsigned long elapsed = milliTemp - EpochPulseStart;
+  unsigned int level = 0;
+
+  if (elapsed < EpochPulseLength)
+  {
+    level = 255 - (elapsed * 255) / EpochPulseLength;
+    level = (level * level) >> 8;
+  }
+  a5nightLight(level);
 }
 
 

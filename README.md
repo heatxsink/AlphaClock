@@ -44,3 +44,10 @@ Setup, on the first unit (the one upstream in the daisy chain):
    - `EPO R` if the first unit sits on the right (it shows the low five digits).
 
 Selecting any other `TIME AND...` option returns the second unit to its own clock display.
+
+While in epoch mode, the first unit also:
+
+- pulses its rear night light once per second, and tells the second unit to pulse with it (`MP` command);
+- sends its display brightness to the second unit, so changing brightness with `+`/`-` on the first unit changes both.
+
+Leaving epoch mode restores both units' configured night light.
